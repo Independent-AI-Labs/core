@@ -20,6 +20,9 @@ pub enum Error {
     #[cfg(feature = "compiler")]
     #[error("cannot read attachment at {1:?}")]
     ReadAttachmentError(#[source] io::Error, PathBuf),
+    #[cfg(feature = "compiler")]
+    #[error("invalid content-id {0:?}: {1}")]
+    InvalidContentIdError(String, &'static str),
 
     #[cfg(feature = "pgp")]
     #[error("cannot sign part using pgp: missing sender")]

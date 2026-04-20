@@ -313,7 +313,44 @@ impl<'a> MmlBodyCompiler {
                 // Content-ID — emitted with angle brackets per RFC 5322.
                 // Enables `<img src="cid:..."/>` inlining within a
                 // `multipart/related` wrapper.
-                if let Some(cid) = props.get(CONTENT_ID) {
+                //
+                // The value is written through `mail_builder::Raw` which
+                // does no sanitization, so we gate it here:
+                //   * strip any outer `<>` the caller may have pasted
+                //     from a prior Content-ID header to avoid emitting
+                //     the malformed `<<foo>>`;
+                //   * require printable ASCII without whitespace,
+                //     matching the RFC 5322 msg-id character set
+                //     loosely — enough to survive strict MTAs such
+                //     as Exchange without rejecting common bare-atom
+                //     IDs (Gmail, Apple Mail accept these);
+                //   * cap length at 200 bytes so a runaway template
+                //     cannot emit multi-kilobyte headers.
+                if let Some(cid_raw) = props.get(CONTENT_ID) {
+                    let cid = cid_raw
+                        .trim_start_matches('<')
+                        .trim_end_matches('>');
+                    if cid.is_empty() {
+                        return Err(Error::InvalidContentIdError(
+                            (*cid_raw).to_owned(),
+                            "empty value",
+                        ));
+                    }
+                    if cid.len() > 200 {
+                        return Err(Error::InvalidContentIdError(
+                            (*cid_raw).to_owned(),
+                            "exceeds 200 bytes",
+                        ));
+                    }
+                    if !cid.bytes().all(|b| b.is_ascii_graphic())
+                        || cid.contains('<')
+                        || cid.contains('>')
+                    {
+                        return Err(Error::InvalidContentIdError(
+                            (*cid_raw).to_owned(),
+                            "must be printable ASCII without whitespace or angle brackets",
+                        ));
+                    }
                     part = part.header("Content-ID", Raw::new(format!("<{cid}>")));
                 }
 
@@ -383,6 +420,7 @@ impl<'a> MmlBodyCompiler {
 
 #[cfg(test)]
 mod tests {
+    use crate::Error;
     use concat_with::concat_line;
     use std::io::prelude::*;
     use tempfile::Builder;
@@ -488,6 +526,68 @@ mod tests {
         assert!(msg.contains("Content-ID: <my-cid>"), "msg: {msg}");
         assert!(msg.contains("Content-Type: image/png"), "msg: {msg}");
         assert!(msg.contains("Content-Disposition: inline"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn content_id_strips_outer_angle_brackets() {
+        // A caller pasting a full Content-ID string should not end
+        // up with doubled brackets on output.
+        let mml = "<#part type=text/plain content-id=\"<logo@host>\">hi<#/part>";
+        let msg = MmlBodyCompiler::new()
+            .compile(mml)
+            .await
+            .unwrap()
+            .message_id("id@localhost")
+            .date(0_u64)
+            .write_to_string()
+            .unwrap();
+        assert!(msg.contains("Content-ID: <logo@host>"), "msg: {msg}");
+        assert!(!msg.contains("<<"), "must not double-wrap: {msg}");
+    }
+
+    #[tokio::test]
+    async fn content_id_rejects_empty() {
+        let mml = "<#part type=text/plain content-id=\"<>\">hi<#/part>";
+        let err = MmlBodyCompiler::new().compile(mml).await.unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidContentIdError(_, "empty value")),
+            "unexpected err: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn content_id_rejects_whitespace() {
+        // Parser-level CR/LF/NUL rejection handles injection; the
+        // emitter also rejects spaces, tabs, and embedded angle
+        // brackets to guarantee a well-formed header.
+        let mml = "<#part type=text/plain content-id=\"foo bar\">hi<#/part>";
+        let err = MmlBodyCompiler::new().compile(mml).await.unwrap_err();
+        assert!(matches!(err, Error::InvalidContentIdError(..)));
+    }
+
+    #[tokio::test]
+    async fn content_id_rejects_oversize() {
+        let huge = "x".repeat(201);
+        let mml = format!("<#part type=text/plain content-id={huge}>hi<#/part>");
+        let err = MmlBodyCompiler::new().compile(&mml).await.unwrap_err();
+        assert!(matches!(
+            err,
+            Error::InvalidContentIdError(_, "exceeds 200 bytes")
+        ));
+    }
+
+    #[tokio::test]
+    async fn content_id_rejects_crlf_at_parse_time() {
+        // With the parser-level control-char rejection in vals.rs,
+        // the whole MML body fails to parse before we even reach
+        // the emitter — so the injection surface is closed at the
+        // earliest possible layer.
+        let mml = "<#part type=text/plain content-id=\"foo\r\nBcc: evil@x\">hi<#/part>";
+        let err = MmlBodyCompiler::new().compile(mml).await.unwrap_err();
+        assert!(
+            matches!(err, Error::ParseMmlError(..)),
+            "expected parse error, got: {err:?}"
+        );
     }
 
     #[tokio::test]
