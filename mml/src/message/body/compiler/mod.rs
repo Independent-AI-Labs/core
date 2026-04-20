@@ -9,7 +9,7 @@ use std::{ffi::OsStr, fs, ops::Deref};
 
 use async_recursion::async_recursion;
 use mail_builder::{
-    headers::raw::Raw,
+    headers::text::Text,
     mime::{BodyPart, MimePart},
     MessageBuilder,
 };
@@ -310,22 +310,41 @@ impl<'a> MmlBodyCompiler {
                     _ => part,
                 };
 
-                // Content-ID — emitted with angle brackets per RFC 5322.
-                // Enables `<img src="cid:..."/>` inlining within a
-                // `multipart/related` wrapper.
+                // Content-ID — emitted with angle brackets per RFC 5322
+                // §3.6.4. Enables `<img src="cid:..."/>` inlining within
+                // a `multipart/related` wrapper (RFC 2387, RFC 2392).
                 //
-                // The value is written through `mail_builder::Raw` which
-                // does no sanitization, so we gate it here:
-                //   * strip any outer `<>` the caller may have pasted
-                //     from a prior Content-ID header to avoid emitting
-                //     the malformed `<<foo>>`;
-                //   * require printable ASCII without whitespace,
-                //     matching the RFC 5322 msg-id character set
-                //     loosely — enough to survive strict MTAs such
-                //     as Exchange without rejecting common bare-atom
-                //     IDs (Gmail, Apple Mail accept these);
-                //   * cap length at 200 bytes so a runaway template
-                //     cannot emit multi-kilobyte headers.
+                // Character set: we accept printable ASCII (0x21..=0x7E)
+                // minus whitespace and angle brackets. This is
+                // *stricter* than §3.6.4's `atext`-based `dot-atom-text`
+                // generator form (we also permit specials like
+                // `( ) : ; , \ "` that §3.6.4 forbids in non-obsolete
+                // form) and *looser* than what existing in-the-wild
+                // clients produce — Gmail emits bare atoms `<ii_…>`
+                // without an `@domain`, Apple Mail emits
+                // `<UUID@apple.com>`, Outlook emits
+                // `<name.png@01D…>`. Requiring `@` would reject
+                // Gmail-style IDs; enforcing strict `atext` would
+                // reject Outlook-style filename-prefixed IDs. The
+                // chosen band is the empirical intersection: what
+                // every mainstream MUA both produces and accepts.
+                //
+                // Sanitization layers (defense in depth):
+                //   1. `val()` / `quoted_val()` in parsers/vals.rs
+                //      reject CR/LF/NUL before they even reach this
+                //      site (primary injection barrier);
+                //   2. strip any outer `<>` the caller may have pasted
+                //      from a prior Content-ID header — prevents the
+                //      malformed `<<foo>>`;
+                //   3. explicit char-class + length validation here;
+                //   4. `mail_builder::Text` (instead of `Raw`) runs
+                //      through `get_encoding_type` and would RFC 2047-
+                //      encode any CR/LF or non-ASCII if steps 1–3 ever
+                //      failed — matches how `to_builder_val` emits
+                //      `HeaderName::ContentId` (see `message/header.rs`).
+                // 200-byte cap: empirical p99 is ~100 bytes, so 2×
+                // headroom; still well under RFC 5322 §2.1.1's 78/998
+                // line limits and the `Raw` / `Text` 76-col fold.
                 if let Some(cid_raw) = props.get(CONTENT_ID) {
                     let cid = cid_raw
                         .trim_start_matches('<')
@@ -351,7 +370,7 @@ impl<'a> MmlBodyCompiler {
                             "must be printable ASCII without whitespace or angle brackets",
                         ));
                     }
-                    part = part.header("Content-ID", Raw::new(format!("<{cid}>")));
+                    part = part.header("Content-ID", Text::new(format!("<{cid}>")));
                 }
 
                 part = match props.get(DISPOSITION) {
