@@ -6,9 +6,9 @@
 //! [Emacs MML definition]: https://www.gnu.org/software/emacs/manual/html_node/emacs-mime/MML-Definition.html
 
 use crate::message::body::{
-    compiler::tokens::Prop, ALTERNATIVE, CHARSET, CREATION_DATE, DATA_ENCODING, DESCRIPTION,
-    DISPOSITION, ENCODING, FILENAME, MIXED, MODIFICATION_DATE, NAME, READ_DATE, RECIPIENT_FILENAME,
-    RELATED, SIZE, TYPE,
+    compiler::tokens::Prop, ALTERNATIVE, CHARSET, CONTENT_ID, CREATION_DATE, DATA_ENCODING,
+    DESCRIPTION, DISPOSITION, ENCODING, FILENAME, MIXED, MODIFICATION_DATE, NAME, READ_DATE,
+    RECIPIENT_FILENAME, RELATED, SIZE, TYPE,
 };
 #[cfg(feature = "pgp")]
 use crate::message::body::{ENCRYPT, RECIPIENTS, SENDER, SIGN};
@@ -75,6 +75,20 @@ pub(crate) fn recipient_filename<'a>() -> impl Parser<'a, &'a str, Prop<'a>, Par
 pub(crate) fn charset<'a>() -> impl Parser<'a, &'a str, Prop<'a>, ParserError<'a>> + Clone {
     just(CHARSET)
         .labelled(CHARSET)
+        .then_ignore(just('=').padded())
+        .then(choice((quoted_val(), val().to_slice())))
+        .padded()
+}
+
+/// The content-id property parser.
+///
+/// > Sets the part's Content-ID header. Useful for inline images
+/// in HTML email via `<img src="cid:..."/>` references against
+/// parts enclosed in a `multipart/related`. The value is emitted
+/// verbatim between RFC-5322 angle-brackets.
+pub(crate) fn content_id<'a>() -> impl Parser<'a, &'a str, Prop<'a>, ParserError<'a>> + Clone {
+    just(CONTENT_ID)
+        .labelled(CONTENT_ID)
         .then_ignore(just('=').padded())
         .then(choice((quoted_val(), val().to_slice())))
         .padded()

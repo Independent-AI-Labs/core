@@ -9,6 +9,7 @@ use std::{ffi::OsStr, fs, ops::Deref};
 
 use async_recursion::async_recursion;
 use mail_builder::{
+    headers::raw::Raw,
     mime::{BodyPart, MimePart},
     MessageBuilder,
 };
@@ -21,10 +22,10 @@ use crate::pgp::Pgp;
 use crate::{Error, Result};
 
 use super::{
-    ALTERNATIVE, ATTACHMENT, DISPOSITION, ENCODING, ENCODING_7BIT, ENCODING_8BIT, ENCODING_BASE64,
-    ENCODING_QUOTED_PRINTABLE, FILENAME, INLINE, MIXED, MULTIPART_BEGIN, MULTIPART_BEGIN_ESCAPED,
-    MULTIPART_END, MULTIPART_END_ESCAPED, NAME, PART_BEGIN, PART_BEGIN_ESCAPED, PART_END,
-    PART_END_ESCAPED, RECIPIENT_FILENAME, RELATED, TYPE,
+    ALTERNATIVE, ATTACHMENT, CONTENT_ID, DISPOSITION, ENCODING, ENCODING_7BIT, ENCODING_8BIT,
+    ENCODING_BASE64, ENCODING_QUOTED_PRINTABLE, FILENAME, INLINE, MIXED, MULTIPART_BEGIN,
+    MULTIPART_BEGIN_ESCAPED, MULTIPART_END, MULTIPART_END_ESCAPED, NAME, PART_BEGIN,
+    PART_BEGIN_ESCAPED, PART_END, PART_END_ESCAPED, RECIPIENT_FILENAME, RELATED, TYPE,
 };
 #[cfg(feature = "pgp")]
 use super::{ENCRYPT, PGP_MIME, SIGN};
@@ -309,6 +310,13 @@ impl<'a> MmlBodyCompiler {
                     _ => part,
                 };
 
+                // Content-ID — emitted with angle brackets per RFC 5322.
+                // Enables `<img src="cid:..."/>` inlining within a
+                // `multipart/related` wrapper.
+                if let Some(cid) = props.get(CONTENT_ID) {
+                    part = part.header("Content-ID", Raw::new(format!("<{cid}>")));
+                }
+
                 part = match props.get(DISPOSITION) {
                     Some(&INLINE) => part.inline(),
                     Some(&ATTACHMENT) => part.attachment(
@@ -437,6 +445,49 @@ mod tests {
         );
 
         assert_eq!(msg, expected_msg);
+    }
+
+    #[tokio::test]
+    async fn inline_image_with_content_id() {
+        // Inline image with content-id — the bytes that let
+        // <img src="cid:my-cid"> resolve inside a multipart/related.
+        let mut attachment = Builder::new()
+            .prefix("inline")
+            .suffix(".png")
+            .rand_bytes(0)
+            .tempfile()
+            .unwrap();
+        // Minimal 1x1 transparent PNG.
+        attachment
+            .write_all(
+                &[
+                    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+                    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+                    0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+                    0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x62, 0x00, 0x01, 0x00, 0x00,
+                    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+                    0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+                ],
+            )
+            .unwrap();
+        let attachment_path = attachment.path().to_string_lossy();
+
+        let mml_body = format!(
+            "<#part filename={attachment_path} type=image/png disposition=inline content-id=my-cid>discarded<#/part>"
+        );
+
+        let msg = MmlBodyCompiler::new()
+            .compile(&mml_body)
+            .await
+            .unwrap()
+            .message_id("id@localhost")
+            .date(0_u64)
+            .write_to_string()
+            .unwrap();
+
+        assert!(msg.contains("Content-ID: <my-cid>"), "msg: {msg}");
+        assert!(msg.contains("Content-Type: image/png"), "msg: {msg}");
+        assert!(msg.contains("Content-Disposition: inline"), "msg: {msg}");
     }
 
     #[tokio::test]

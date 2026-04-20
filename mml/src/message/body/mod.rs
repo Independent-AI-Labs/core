@@ -31,6 +31,7 @@ pub(crate) const MULTIPART_END_ESCAPED: &str = "<#!/multipart>";
 pub(crate) const ALTERNATIVE: &str = "alternative";
 pub(crate) const ATTACHMENT: &str = "attachment";
 pub(crate) const CHARSET: &str = "charset";
+pub(crate) const CONTENT_ID: &str = "content-id";
 pub(crate) const CREATION_DATE: &str = "creation-date";
 pub(crate) const DATA_ENCODING: &str = "data-encoding";
 pub(crate) const DESCRIPTION: &str = "description";
